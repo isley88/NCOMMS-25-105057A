@@ -1,0 +1,777 @@
+*Group A: 1-4 allergic dx (), Group B: 5-6 allergic dx ();
+*Subgroup: check the dummy tables on the 2025-01-07;
+*Share the frequencies of OCS and allergic dx count;
+*EXP1: allergic rhinitis, EXP2: atopic dermatitis, EXP3: food allergy, EXP4: chronic rhinosinusitis, EXP5: urticaria & angioedema, EXP6: anaphylaxis, EXP7: group A, EXP8: group B;
+
+*5) PS matcing;
+PROC SQL; CREATE TABLE STEP5_1 AS SELECT DISTINCT * FROM S1.STEP3 AS A LEFT JOIN S1.STEP4_COV AS B ON A.INDI_DSCM_NO=B.INDI_DSCM_NO LEFT JOIN S1.STEP4_COV_ADD AS C ON A.INDI_DSCM_NO=C.INDI_DSCM_NO; QUIT;  
+
+%MACRO PS_MATCH1;
+%DO INTEGER=1 %TO 8;
+
+DATA STEP5_1_1; SET STEP5_1; IF EXP0=0 OR EXP&INTEGER.=1; RUN;
+PROC LOGISTIC DATA=STEP5_1_1 DESC; CLASS EXP0 SEX BP_G OBESE_G URBAN INCOME COMOR1-COMOR6 COMED1 FBS_G CHOL_G GFR_G SMK_G DRK_G PA_G; MODEL EXP0=AGE CCI SEX URBAN INCOME COMOR1-COMOR6 COMED1; OUTPUT OUT=STEP5_2 P=PROB; QUIT;
+%OneToManyMTCH(work, STEP5_2, exp0, , indi_dscm_no, STEP5_3, 1); 
+DATA S1.STEP5_CRUDE_EXP&INTEGER.; SET STEP5_2; RENAME EXP0=EXP; RUN;
+DATA S1.STEP5_MATCH_EXP&INTEGER.; SET STEP5_3; RENAME EXP0=EXP; RUN;
+
+%END;
+%MEND;
+
+%PS_MATCH1;
+
+
+*6) Statistical analyses;
+
+**Baseline;
+%macro baseline(integer);
+
+DATA TEMP1; SET S1.STEP5_CRUDE_EXP&integer.; IF CCI=0 THEN CCI_G=1; ELSE IF CCI=1 THEN CCI_G=2; ELSE CCI_G=3; RUN;
+DATA TEMP2; SET S1.STEP5_MATCH_EXP&integer.; IF CCI=0 THEN CCI_G=1; ELSE IF CCI=1 THEN CCI_G=2; ELSE CCI_G=3; RUN;
+
+proc tabulate data=TEMP1;
+class exp AGG CCI_G SEX BP_G OBESE_G URBAN INCOME COMOR1-COMOR6 COMED1 FBS_G CHOL_G GFR_G SMK_G DRK_G PA_G;
+var AGE CCI;
+table (AGG CCI_G SEX URBAN INCOME COMOR1-COMOR6 COMED1)*(n colpctn) (AGE CCI)*(n mean std q1 median q3), all exp;
+quit;
+
+proc tabulate data=TEMP2;
+class exp AGG CCI_G SEX BP_G OBESE_G URBAN INCOME COMOR1-COMOR6 COMED1 FBS_G CHOL_G GFR_G SMK_G DRK_G PA_G;
+var AGE CCI;
+table (AGG CCI_G SEX URBAN INCOME COMOR1-COMOR6 COMED1)*(n colpctn) (AGE CCI)*(n mean std q1 median q3), all exp;
+quit;
+
+%stddiff(
+inds =  TEMP1, 
+groupvar = exp ,
+numvars = AGE CCI, 
+charvars = AGG CCI_G SEX URBAN INCOME COMOR1 COMOR2 COMOR3 COMOR4 COMOR5 COMOR6 COMED1, 
+wtvar = , 
+stdfmt =5.2, 
+outds =  std_before&integer.);
+
+%stddiff(
+inds =  TEMP2, 
+groupvar = exp ,
+numvars = AGE CCI, 
+charvars = AGG CCI_G SEX URBAN INCOME COMOR1 COMOR2 COMOR3 COMOR4 COMOR5 COMOR6 COMED1, 
+wtvar = , 
+stdfmt =5.2, 
+outds =  std_AFTER&integer.);
+
+%mend;
+
+%baseline(1);
+%baseline(2);
+%baseline(3);
+%baseline(4);
+%baseline(5);
+%baseline(6);
+%baseline(7);
+%baseline(8);
+
+*Main analysis;
+%macro risk_evaluation(index);
+%do integer=1 %to 8;
+
+*Calculate person-year;
+data crude1; set S1.STEP5_CRUDE_EXP&INTEGER.; l_fu_dt=log(fu_dt); run;
+data match1; set S1.STEP5_MATCH_EXP&INTEGER.; l_fu_dt=log(fu_dt); run;
+
+*Calculate incidence rate;
+proc sql; create table crude2 as select "Crude" as type, exp, count(distinct indi_dscm_no) as n_patient, sum(fu_dt) as s_pytime, sum(out) as n_event, (calculated n_event/calculated s_pytime*1000) as ir_p1000  from crude1 group by 1, 2; quit;
+proc sql; create table match2 as select "Match" as type, exp, count(distinct indi_dscm_no) as n_patient, sum(fu_dt) as s_pytime, sum(out) as n_event, (calculated n_event/calculated s_pytime*1000) as ir_p1000  from match1 group by 1, 2; quit;
+
+*Calculate hazard ratio;
+proc phreg data=crude1; class exp (ref="0"); model fu_dt*out(0)=exp/ risklimits; ods output ParameterEstimates=crude3; quit; data crude4; set crude3; exp=ClassVal0*1; run;
+proc phreg data=match1; class exp (ref="0"); model fu_dt*out(0)=exp/ risklimits; ods output ParameterEstimates=match3; quit; data match4; set match3; exp=ClassVal0*1; run;
+
+*Calculate 95% CI for incidence rate;
+ods output lsmeans=crude5; proc genmod data=crude1; class  exp(ref="0"); model out=exp / dist=poisson offset=l_fu_dt link=log; lsmeans exp/ cl; quit; ods output clear;  
+data crude6; set crude5; ir=put((exp(estimate))*1000,5.3); ir_p1000_lci=put((exp(lower))*1000,5.3); ir_p1000_uci=put((exp(upper))*1000,5.3); run;  
+ods output lsmeans=match5; proc genmod data=match1; class  exp(ref="0"); model out=exp / dist=poisson offset=l_fu_dt link=log; lsmeans exp/ cl; quit; ods output clear;  
+data match6; set match5; ir=put((exp(estimate))*1000,5.3); ir_p1000_lci=put((exp(lower))*1000,5.3); ir_p1000_uci=put((exp(upper))*1000,5.3); run;  
+
+proc sql; create table crude as select distinct a.*, c.ir_p1000_lci, c.ir_p1000_uci, b.hazardratio, b.hrlowercl, b.hruppercl, b.probchisq, "Crude" as type from crude2 as a left join crude4 as b on a.exp=b.exp left join crude6 as c on a.exp=c.exp; quit; 
+proc sql; create table match as select distinct a.*, c.ir_p1000_lci, c.ir_p1000_uci, b.hazardratio, b.hrlowercl, b.hruppercl, b.probchisq, "Match" as type from match2 as a left join match4 as b on a.exp=b.exp left join match6 as c on a.exp=c.exp; quit; 
+data results_EXP&integer.; set crude match; EXP=&integer.; run; 
+
+%end;
+data O.result_&index.; set results_EXP1-results_EXP8; index="&index."; run;
+
+%mend;
+
+%risk_evaluation(main);
+
+
+******Subgroup analysis;
+
+**Disease count;
+
+****Group 1: Exp 7;
+data sub1_1;
+set s1.step5_crude_exp7;
+n_exp=sum(exp1,exp2,exp3,exp4);
+if exp=0 then c_exp=0;
+else if n_exp<=1 then c_exp=1;
+else if n_exp<=2 then c_exp=2;
+else c_exp=3;
+run;
+
+proc freq data=sub1_1;  table c_exp; quit;
+
+%macro ps_match2;
+%do integer=1 %to 3;
+
+data temp1;
+set sub1_1;
+if c_exp=0 or c_exp=&integer.;
+run;
+
+proc logistic data=temp1 desc; 
+class exp sex urban income comor1-comor6 comed1;
+model exp=age cci sex urban income comor1-comor6 comed1;
+output out=temp2 p=prob;
+quit;
+
+%OneToManyMTCH(work, temp2, exp, , indi_dscm_no, temp3, 1); 
+
+data sub.s1_exp7_crude_g&integer.; set temp2; run;
+data sub.s1_exp7_match_g&integer.; set temp3; run;
+
+%end;
+%mend;
+
+%ps_match2;
+
+****Group 2: Exp 8;
+data sub1_1;
+set s1.step5_crude_exp8;
+n_exp=sum(exp5,exp6);
+if exp=0 then c_exp=0;
+else if n_exp<=1 then c_exp=1;
+else c_exp=2;
+run;
+
+proc freq data=sub1_1;  table c_exp; quit;
+
+%macro ps_match2;
+%do integer=1 %to 2;
+
+data temp1;
+set sub1_1;
+if c_exp=0 or c_exp=&integer.;
+run;
+
+proc logistic data=temp1 desc; 
+class exp sex urban income comor1-comor6 comed1;
+model exp=age cci sex urban income comor1-comor6 comed1;
+output out=temp2 p=prob;
+quit;
+
+%OneToManyMTCH(work, temp2, exp, , indi_dscm_no, temp3, 1); 
+
+data sub.s1_exp8_crude_g&integer.; set temp2; run;
+data sub.s1_exp8_match_g&integer.; set temp3; run;
+
+%end;
+%mend;
+
+%ps_match2;
+
+%macro risk_eval2(data1,data2,index);
+
+*Calculate person-year;
+data crude1; set sub.&data1.; l_fu_dt=log(fu_dt); run;
+data match1; set sub.&data2.; l_fu_dt=log(fu_dt); run;
+
+*Calculate incidence rate;
+proc sql; create table crude2 as select "Crude" as type, exp, count(distinct indi_dscm_no) as n_patient, sum(fu_dt) as s_pytime, sum(out) as n_event, (calculated n_event/calculated s_pytime*1000) as ir_p1000  from crude1 group by 1, 2; quit;
+proc sql; create table match2 as select "Match" as type, exp, count(distinct indi_dscm_no) as n_patient, sum(fu_dt) as s_pytime, sum(out) as n_event, (calculated n_event/calculated s_pytime*1000) as ir_p1000  from match1 group by 1, 2; quit;
+
+*Calculate hazard ratio;
+proc phreg data=crude1; class exp (ref="0"); model fu_dt*out(0)=exp/ risklimits; ods output ParameterEstimates=crude3; quit; data crude4; set crude3; exp=ClassVal0*1; run;
+proc phreg data=match1; class exp (ref="0"); model fu_dt*out(0)=exp/ risklimits; ods output ParameterEstimates=match3; quit; data match4; set match3; exp=ClassVal0*1; run;
+
+*Calculate 95% CI for incidence rate;
+ods output lsmeans=crude5; proc genmod data=crude1; class  exp(ref="0"); model out=exp / dist=poisson offset=l_fu_dt link=log; lsmeans exp/ cl; quit; ods output clear;  
+data crude6; set crude5; ir=put((exp(estimate))*1000,5.3); ir_p1000_lci=put((exp(lower))*1000,5.3); ir_p1000_uci=put((exp(upper))*1000,5.3); run;  
+ods output lsmeans=match5; proc genmod data=match1; class  exp(ref="0"); model out=exp / dist=poisson offset=l_fu_dt link=log; lsmeans exp/ cl; quit; ods output clear;  
+data match6; set match5; ir=put((exp(estimate))*1000,5.3); ir_p1000_lci=put((exp(lower))*1000,5.3); ir_p1000_uci=put((exp(upper))*1000,5.3); run;  
+
+proc sql; create table crude as select distinct a.*, c.ir_p1000_lci, c.ir_p1000_uci, b.hazardratio, b.hrlowercl, b.hruppercl, b.probchisq, "Crude" as type from crude2 as a left join crude4 as b on a.exp=b.exp left join crude6 as c on a.exp=c.exp; quit; 
+proc sql; create table match as select distinct a.*, c.ir_p1000_lci, c.ir_p1000_uci, b.hazardratio, b.hrlowercl, b.hruppercl, b.probchisq, "Match" as type from match2 as a left join match4 as b on a.exp=b.exp left join match6 as c on a.exp=c.exp; quit; 
+data o.result_&index.; set crude match; index="&index."; run; 
+
+%mend;
+
+%risk_eval2(s1_exp7_crude_g1,s1_exp7_match_g1,sub1_1);
+%risk_eval2(s1_exp7_crude_g2,s1_exp7_match_g2,sub1_2);
+%risk_eval2(s1_exp7_crude_g3,s1_exp7_match_g3,sub1_3);
+%risk_eval2(s1_exp8_crude_g1,s1_exp8_match_g1,sub1_4);
+%risk_eval2(s1_exp8_crude_g2,s1_exp8_match_g2,sub1_5);
+
+**OCS & Dx;
+%macro mean_ocs(dx,exp);
+
+data temp1;
+set c.dx_code;
+if dx_index=&dx.;
+run;
+
+proc sql;
+create table temp2 as
+select distinct a.*
+from c.cohort_sick as a inner join temp1 as b
+on substr(sick_cd,1,3)=dx_cd or substr(sick_cd,1,4)=dx_cd or substr(sick_cd,1,5)=dx_cd or substr(sick_cd,1,6)=dx_cd;
+quit;
+
+proc sql;
+create table temp3 as
+select distinct a.*, b.infc_dt
+from temp2 as a inner join c.cohort as b
+on a.indi_dscm_no=b.indi_dscm_no and a.start_dt<b.infc_dt;
+quit;
+
+proc sql;
+create table temp4 as
+select distinct *
+from temp3 as a inner join s1.data_ocs_all as b
+on a.cmn_key=b.cmn_key;
+quit;
+
+proc sql;
+create table temp5 as
+select distinct indi_dscm_no, count(distinct cmn_key) as no_visit, sum(dose) as sum_dose_ocs
+from temp4 
+group by 1;
+quit;
+
+proc sql;
+create table temp6 as
+select *
+from temp5 
+where indi_dscm_no in (select indi_dscm_no from s1.step5_crude_exp&exp. where exp=1);
+quit;
+
+proc sql;
+create table temp7 as
+select distinct *
+from s1.step5_crude_exp&exp. as a left join temp6 as b
+on a.indi_dscm_no=b.indi_dscm_no;
+quit;
+
+data sub.ocs_exp&exp._crude;
+set temp7;
+mean_dose=sum_dose_ocs/no_visit;
+if missing(mean_dose) then mean_dose=0;
+run;
+
+%mend;
+
+%mean_ocs(1,1);
+%mean_ocs(4,2);
+%mean_ocs(5,3);
+%mean_ocs(2,4);
+%mean_ocs(3,5);
+%mean_ocs(6,6);
+
+proc means data=sub.ocs_exp1_crude n mean median q1 q3; where exp=1; var mean_dose; quit; 
+proc means data=sub.ocs_exp2_crude n mean median q1 q3; where exp=1; var mean_dose; quit; 
+proc means data=sub.ocs_exp3_crude n mean median q1 q3; where exp=1; var mean_dose; quit; 
+proc means data=sub.ocs_exp4_crude n mean median q1 q3; where exp=1; var mean_dose; quit; 
+proc means data=sub.ocs_exp5_crude n mean median q1 q3; where exp=1; var mean_dose; quit; 
+proc means data=sub.ocs_exp6_crude n mean median q1 q3; where exp=1; var mean_dose; quit; 
+
+******Q3;
+
+*Group 1: Exp 7;
+
+proc sql;
+create table temp1 as
+select distinct a.*, b.mean_dose as md1, c.mean_dose as md2, d.mean_dose as md3, e.mean_dose as md4
+from s1.step5_crude_exp7 as a left join sub.ocs_exp1_crude as b on a.indi_dscm_no=b.indi_dscm_no
+left join sub.ocs_exp2_crude as c on a.indi_dscm_no=c.indi_dscm_no
+left join sub.ocs_exp3_crude as d on a.indi_dscm_no=d.indi_dscm_no
+left join sub.ocs_exp4_crude as e on a.indi_dscm_no=e.indi_dscm_no;
+quit;
+
+data temp2;
+set temp1;
+if exp1=1 and md1>5 then g_ocs1=1; else g_ocs1=0;
+if exp2=1 and md2>5 then g_ocs2=1; else g_ocs2=0;
+if exp3=1 and md3>16 then g_ocs3=1; else g_ocs3=0;
+if exp4=1 and md4>5 then g_ocs4=1; else g_ocs4=0;
+g_ocs=max(g_ocs1,g_ocs2,g_ocs3,g_ocs4);
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+
+data temp3;
+set temp2;
+if exp=0 or g_ocs=&integer.;
+run;
+
+proc logistic data=temp3 desc; 
+class exp sex urban income comor1-comor6 comed1;
+model exp=age cci sex urban income comor1-comor6 comed1;
+output out=temp4 p=prob;
+quit;
+
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+
+data sub.s2_exp7_crude_g&integer.; set temp4; run;
+data sub.s2_exp7_match_g&integer.; set temp5; run;
+
+%end;
+%mend;
+
+%ps_match2;
+
+*Group 2: Exp 8;
+proc sql;
+create table temp1 as
+select distinct a.*, b.mean_dose as md5, c.mean_dose as md6
+from s1.step5_crude_exp8 as a left join sub.ocs_exp5_crude as b on a.indi_dscm_no=b.indi_dscm_no
+left join sub.ocs_exp6_crude as c on a.indi_dscm_no=c.indi_dscm_no;
+quit;
+
+data temp2;
+set temp1;
+if exp5=1 and md5>11.6 then g_ocs1=1; else g_ocs1=0;
+if exp6=1 and md6>156.3 then g_ocs2=1; else g_ocs2=0;
+g_ocs=max(g_ocs1,g_ocs2);
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+
+data temp3;
+set temp2;
+if exp=0 or g_ocs=&integer.;
+run;
+
+proc logistic data=temp3 desc; 
+class exp sex urban income comor1-comor6 comed1;
+model exp=age cci sex urban income comor1-comor6 comed1;
+output out=temp4 p=prob;
+quit;
+
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+
+data sub.s2_exp8_crude_g&integer.; set temp4; run;
+data sub.s2_exp8_match_g&integer.; set temp5; run;
+
+%end;
+%mend;
+
+%ps_match2;
+
+%risk_eval2(s2_exp7_crude_g0,s2_exp7_match_g0,sub2_1);
+%risk_eval2(s2_exp7_crude_g1,s2_exp7_match_g1,sub2_2);
+%risk_eval2(s2_exp8_crude_g0,s2_exp8_match_g0,sub2_3);
+%risk_eval2(s2_exp8_crude_g1,s2_exp8_match_g1,sub2_4);
+
+
+******Mean;
+
+*Group 1: Exp 7;
+proc sql;
+create table temp1 as
+select distinct a.*, b.mean_dose as md1, c.mean_dose as md2, d.mean_dose as md3, e.mean_dose as md4
+from s1.step5_crude_exp7 as a left join sub.ocs_exp1_crude as b on a.indi_dscm_no=b.indi_dscm_no
+left join sub.ocs_exp2_crude as c on a.indi_dscm_no=c.indi_dscm_no
+left join sub.ocs_exp3_crude as d on a.indi_dscm_no=d.indi_dscm_no
+left join sub.ocs_exp4_crude as e on a.indi_dscm_no=e.indi_dscm_no;
+quit;
+
+data temp2;
+set temp1;
+if exp1=1 and md1>4.5275728 then g_ocs1=1; else g_ocs1=0;
+if exp2=1 and md2>5.7996188 then g_ocs2=1; else g_ocs2=0;
+if exp3=1 and md3>10.6413077 then g_ocs3=1; else g_ocs3=0;
+if exp4=1 and md4>4.6145473 then g_ocs4=1; else g_ocs4=0;
+g_ocs=max(g_ocs1,g_ocs2,g_ocs3,g_ocs4);
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+
+data temp3;
+set temp2;
+if exp=0 or g_ocs=&integer.;
+run;
+
+proc logistic data=temp3 desc; 
+class exp sex urban income comor1-comor6 comed1;
+model exp=age cci sex urban income comor1-comor6 comed1;
+output out=temp4 p=prob;
+quit;
+
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+
+data sub.s3_exp7_crude_g&integer.; set temp4; run;
+data sub.s3_exp7_match_g&integer.; set temp5; run;
+
+%end;
+%mend;
+
+%ps_match2;
+
+*Group 2: Exp 8;
+proc sql;
+create table temp1 as
+select distinct a.*, b.mean_dose as md5, c.mean_dose as md6
+from s1.step5_crude_exp8 as a left join sub.ocs_exp5_crude as b on a.indi_dscm_no=b.indi_dscm_no
+left join sub.ocs_exp6_crude as c on a.indi_dscm_no=c.indi_dscm_no;
+quit;
+
+data temp2;
+set temp1;
+if exp5=1 and md5>9.3845404 then g_ocs1=1; else g_ocs1=0;
+if exp6=1 and md6>74.0975597 then g_ocs2=1; else g_ocs2=0;
+g_ocs=max(g_ocs1,g_ocs2);
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+
+data temp3;
+set temp2;
+if exp=0 or g_ocs=&integer.;
+run;
+
+proc logistic data=temp3 desc; 
+class exp sex urban income comor1-comor6 comed1;
+model exp=age cci sex urban income comor1-comor6 comed1;
+output out=temp4 p=prob;
+quit;
+
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+
+data sub.s3_exp8_crude_g&integer.; set temp4; run;
+data sub.s3_exp8_match_g&integer.; set temp5; run;
+
+%end;
+%mend;
+
+%ps_match2;
+
+%risk_eval2(s3_exp7_crude_g0,s3_exp7_match_g0,sub3_1);
+%risk_eval2(s3_exp7_crude_g1,s3_exp7_match_g1,sub3_2);
+%risk_eval2(s3_exp8_crude_g0,s3_exp8_match_g0,sub3_3);
+%risk_eval2(s3_exp8_crude_g1,s3_exp8_match_g1,sub3_4);
+
+****Age;
+
+*Mean;
+**Group 1: Exp 7;
+data temp2;
+set s1.step5_crude_exp7;
+if age<39.516376 then g=0; else g=1;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; if g=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s4_exp7_crude_g&integer.; set temp4; run;
+data sub.s4_exp7_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+**Group 2: Exp 8;
+data temp2;
+set s1.step5_crude_exp8;
+if age<42.311716 then g=0; else g=1;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; ifg=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s4_exp8_crude_g&integer.; set temp4; run;
+data sub.s4_exp8_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+%risk_eval2(s4_exp7_crude_g0,s4_exp7_match_g0,sub4_1);
+%risk_eval2(s4_exp7_crude_g1,s4_exp7_match_g1,sub4_2);
+%risk_eval2(s4_exp8_crude_g0,s4_exp8_match_g0,sub4_3);
+%risk_eval2(s4_exp8_crude_g1,s4_exp8_match_g1,sub4_4);
+
+
+*Median;
+**Group 1: Exp 7;
+data temp2;
+set s1.step5_crude_exp7;
+if age<39 then g=0; else g=1;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; if g=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s5_exp7_crude_g&integer.; set temp4; run;
+data sub.s5_exp7_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+**Group 2: Exp 8;
+data temp2;
+set s1.step5_crude_exp8;
+if age<42 then g=0; else g=1;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; if g=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s5_exp8_crude_g&integer.; set temp4; run;
+data sub.s5_exp8_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+%risk_eval2(s5_exp7_crude_g0,s5_exp7_match_g0,sub5_1);
+%risk_eval2(s5_exp7_crude_g1,s5_exp7_match_g1,sub5_2);
+%risk_eval2(s5_exp8_crude_g0,s5_exp8_match_g0,sub5_3);
+%risk_eval2(s5_exp8_crude_g1,s5_exp8_match_g1,sub5_4);
+
+
+****Sex;
+**Group 1: Exp 7;
+data temp2;
+set s1.step5_crude_exp7;
+if sex=1 then g=1; else g=0;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; if g=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s6_exp7_crude_g&integer.; set temp4; run;
+data sub.s6_exp7_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+**Group 2: Exp 8;
+data temp2;
+set s1.step5_crude_exp8;
+if sex=1 then g=1; else g=0;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; if g=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s6_exp8_crude_g&integer.; set temp4; run;
+data sub.s6_exp8_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+%risk_eval2(s6_exp7_crude_g0,s6_exp7_match_g0,sub6_1);
+%risk_eval2(s6_exp7_crude_g1,s6_exp7_match_g1,sub6_2);
+%risk_eval2(s6_exp8_crude_g0,s6_exp8_match_g0,sub6_3);
+%risk_eval2(s6_exp8_crude_g1,s6_exp8_match_g1,sub6_4);
+
+
+****Severity of COVID-19;
+**Group 1: Exp 7;
+data temp2;
+set s1.step5_crude_exp7;
+if severe=1 then g=1; else g=0;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; if g=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s7_exp7_crude_g&integer.; set temp4; run;
+data sub.s7_exp7_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+**Group 2: Exp 8;
+data temp2;
+set s1.step5_crude_exp8;
+if severe=1 then g=1; else g=0;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; if g=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s7_exp8_crude_g&integer.; set temp4; run;
+data sub.s7_exp8_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+%risk_eval2(s7_exp7_crude_g0,s7_exp7_match_g0,sub7_1);
+%risk_eval2(s7_exp7_crude_g1,s7_exp7_match_g1,sub7_2);
+%risk_eval2(s7_exp8_crude_g0,s7_exp8_match_g0,sub7_3);
+%risk_eval2(s7_exp8_crude_g1,s7_exp8_match_g1,sub7_4);
+
+
+****COVID-19 vaccination;
+**Group 1: Exp 7;
+data temp2;
+set s1.step5_crude_exp7;
+if vaccination=1 then g=1; else g=0;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; if g=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s8_exp7_crude_g&integer.; set temp4; run;
+data sub.s8_exp7_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+**Group 2: Exp 8;
+data temp2;
+set s1.step5_crude_exp8;
+if vaccination=1 then g=1; else g=0;
+drop _level_ prob;
+run;
+
+%macro ps_match2;
+%do integer=0 %to 1;
+data temp3; set temp2; if g=&integer.; run;
+proc logistic data=temp3 desc; class exp sex urban income comor1-comor6 comed1;model exp=age cci sex urban income comor1-comor6 comed1;output out=temp4 p=prob; quit;
+%OneToManyMTCH(work, temp4, exp, , indi_dscm_no, temp5, 1); 
+data sub.s8_exp8_crude_g&integer.; set temp4; run;
+data sub.s8_exp8_match_g&integer.; set temp5; run;
+%end;
+%mend;
+
+%ps_match2;
+
+%risk_eval2(s8_exp7_crude_g0,s8_exp7_match_g0,sub8_1);
+%risk_eval2(s8_exp7_crude_g1,s8_exp7_match_g1,sub8_2);
+%risk_eval2(s8_exp8_crude_g0,s8_exp8_match_g0,sub8_3);
+%risk_eval2(s8_exp8_crude_g1,s8_exp8_match_g1,sub8_4);
+
+****KM Curve;
+%macro km_curve(integer);
+
+data temp1; set s1.step5_crude_exp&integer.; fu=fu_dt*365.25/30.4375; run;
+ods graphics on;
+ods output survivalplot=survivalplot;
+proc lifetest data=temp1 plots=s(atrisk(outside)=0 to 30 by 2) outs=km (drop=sdf_lcl sdf_ucl) notable; time fu*out(0); strata exp/ test=logrank; quit;
+data s1.km_crude_exp&integer.; set survivalplot; surv1=(1-survival); surv2=(1-survival)*100; surv3=survival*100; if stratum=0 then ant="Non-AD"; else if stratum=1 then ant="AD"; run;
+ods graphics off;
+
+data temp1; set s1.step5_match_exp&integer.; fu=fu_dt*365.25/30.4375; run;
+ods graphics on;
+ods output survivalplot=survivalplot;
+proc lifetest data=temp1 plots=s(atrisk(outside)=0 to 30 by 2) outs=km (drop=sdf_lcl sdf_ucl) notable; time fu*out(0); strata exp/ test=logrank; quit;
+data s1.km_match_exp&integer.; set survivalplot; surv1=(1-survival); surv2=(1-survival)*100; surv3=survival*100; if stratum=0 then ant="Non-AD"; else if stratum=1 then ant="AD"; run;
+ods graphics off;
+
+%mend;
+
+%km_curve(1);
+%km_curve(2);
+%km_curve(3);
+%km_curve(4);
+%km_curve(5);
+%km_curve(6);
+%km_curve(7);
+%km_curve(8);
+
+%macro km_curve2(integer);
+
+ods graphics/maxobs=5000000 ANTIALIASMAX=4369200;
+proc sgplot data=s1.km_crude_exp&integer.; * noborder;
+styleattrs datacontrastcolors=('blue' 'red' blue lightred green orange);
+step x=time y=surv2 / group=stratum name='s' lineattrs=(pattern=1 thickness=1);
+yaxis values=(0 to 2 by 0.2) label="Cumulative Incidence (%)";
+xaxis values=(0 to 28 by 4) fitpolicy=none label="Follow-up time (Month) ";
+xaxistable atrisk / x=tatrisk class=stratum colorgroup=stratum valueattrs=(weight=bold size=7) labelattrs=(size=7) location=outside;
+refline 0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0/ axis= y  lineattrs=(color=gray pattern=1 thickness=1) transparency=1;
+keylegend 's' / linelength=15 valueattrs=(size=8);
+run;
+ods graphics off;
+
+ods graphics/maxobs=5000000 ANTIALIASMAX=4369200;
+proc sgplot data=s1.km_match_exp&integer.; * noborder;
+styleattrs datacontrastcolors=('blue' 'red' blue lightred green orange);
+step x=time y=surv2 / group=stratum name='s' lineattrs=(pattern=1 thickness=1);
+yaxis values=(0 to 2 by 0.2) label="Cumulative Incidence (%)";
+xaxis values=(0 to 28 by 4) fitpolicy=none label="Follow-up time (Month) ";
+xaxistable atrisk / x=tatrisk class=stratum colorgroup=stratum valueattrs=(weight=bold size=7) labelattrs=(size=7) location=outside;
+refline 0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0/ axis= y  lineattrs=(color=gray pattern=1 thickness=1) transparency=1;
+keylegend 's' / linelength=15 valueattrs=(size=8);
+run;
+ods graphics off;
+
+%mend;
+
+%km_curve2(1);
+%km_curve2(2);
+%km_curve2(3);
+%km_curve2(4);
+%km_curve2(5);
+%km_curve2(6);
+%km_curve2(7);
+%km_curve2(8);
+
+
+
+
+
+
+ods graphics/maxobs=5000000 ANTIALIASMAX=4369200;
+proc sgplot data=d.surv_main1_crude; * noborder;
+styleattrs datacontrastcolors=('blue' 'red' blue lightred green orange);
+step x=time y=surv2 / group=stratum name='s' lineattrs=(pattern=1 thickness=2);
+yaxis values=(0 to 1 by 0.2) label="Survival probability (%)";
+xaxis values=(0 to 9 by 1) fitpolicy=none label="Follow-up time ";
+xaxistable atrisk / x=tatrisk class=stratum colorgroup=stratum valueattrs=(weight=bold size=7) labelattrs=(size=7) location=outside;
+refline 0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0/ axis= y  lineattrs=(color=gray pattern=1 thickness=1) transparency=1;
+keylegend 's' / linelength=15 valueattrs=(size=8);
+
+run;
+ods graphics off;
